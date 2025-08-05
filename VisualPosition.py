@@ -1,10 +1,14 @@
-
 import time, math, os, gc, sys, _thread
 from media.sensor import *
 from media.display import *
 from media.media import *
 from machine import UART, FPIOA, Pin, SPI, WDT
 ################################################################################################################
+#gloabl value
+DETECT_WIDTH = ALIGN_UP(640, 16)
+DETECT_HEIGHT = ALIGN_UP(480, 16)
+codestatus = 0 #0: work, 1: debug
+#################################################################################################################
 class FileHandler:
     """
     The format of PixelProportion file is txt.
@@ -85,6 +89,9 @@ class FileHandler:
         self.update_data(num2=num2)
 #################################################################################################################
 class WS2812B:
+    """
+    The class is used for WS2812B LED
+    """
     def __init__(self, spi_id = 1, num_leds = 9, baudrate=5000000):
         self.spi = SPI(spi_id, baudrate=baudrate, polarity=0, phase=0, bits=8)
         self.num_leds = num_leds
@@ -125,16 +132,13 @@ class WS2812B:
 ################################################################################################################
 #codestatus: work
 ################################################################################################################
-#global variable
-DETECT_WIDTH = ALIGN_UP(640, 16)
-DETECT_HEIGHT = ALIGN_UP(480, 16)
+#work global variable
 ReqTelBuf = bytearray(1)
 statusbits = b'\x00\x01\x02\x04\x08' # statusbits: ev,np,err,wrn
 count_of_has_position = 0
 error_of_none_position = 2
 fh = FileHandler("/data/PixelProportion.txt")
-proportion,front_position = fh.read_data()
-codestatus = 0 #0: work, 1: debug
+proportion,front_position = fh.read_data()#propotion is defined by the distance between camera and datamatrix
 ################################################################################################################
 def hardware_init():
     # camera initialization
@@ -150,24 +154,20 @@ def hardware_init():
     fpioa.set_function(3, fpioa.UART1_TXD)
     fpioa.set_function(4, fpioa.UART1_RXD)
     #8-E-1 Mode
-    uart = UART(UART.UART1, baudrate=115200, bits=UART.EIGHTBITS, parity=UART.PARITY_EVEN, stop=UART.STOPBITS_ONE)
+    uart = UART(UART.UART1, baudrate=115200, bits=UART.EIGHTBITS, 
+                parity=UART.PARITY_EVEN, stop=UART.STOPBITS_ONE)
     #spi interface:spi1 MOSI-16 MISO-17
     fpioa.set_function(16, fpioa.QSPI0_D0)
     leds = WS2812B()
     leds.set_single_color(0)
     return sensor, uart, leds
-#################################################################################################################
+#############################################################################################################
 sensor, uart, _ = hardware_init()
-#################################################################################################################
-def uart_read(readbuf):
-    global uart
-    return uart.read(readbuf)
-#################################################################################################################
-def uart_send(writebuf):
-    global uart
-    uart.write(writebuf)
 #############################################################################################################
 class RingBuffer:
+    """
+    To store the snapshot, used as a buffer
+    """
     def __init__(self, size=2):
         self.size = size
         self.buffer = [None] * size
@@ -204,6 +204,9 @@ ring_buffer = RingBuffer()
 buffer_lock = _thread.allocate_lock()
 ###############################################################################################################
 def safe_snapshot():
+    """
+    To get the snapshot, and store into the buffer
+    """
     global sensor, ring_buffer
     try:
         while True:
@@ -253,10 +256,9 @@ def split_payload(payload):
     else:
         return None
 ###############################################################################################################
-#To determine if the position signal is error or lost, filter the position signal.
 def write_position_to_file(current_position):
     """
-    Write the calculated x-position data into the parameter file
+    Write current x-position data into the parameter file
     """
     global front_position, count_of_has_position, fh
 
@@ -267,10 +269,14 @@ def write_position_to_file(current_position):
         fh.write_front_position(current_position)
         count_of_has_position = 0
 ###############################################################################################################
-def get_blobs_roi(qr_blobs, img_height):
+def get_blobs_roi(dm_blobs, img_height):
+    """
+    if realization use blob desize area, the func
+    is to adjust the picture, y and height 
+    """
     y = 0
     h = img_height
-    for blob in qr_blobs:
+    for blob in dm_blobs:
         _, y, _, h = blob.rect()
         # Adjust the height to an integer multiple of 8
         h = ((h + 7) // 8) * 8
@@ -284,23 +290,29 @@ def get_blobs_roi(qr_blobs, img_height):
 thresholds = [(180, 215)]
 ###############################################################################################################
 def process_image():
+    """
+    prcess The obtained image and find datamatrix
+    to get detected matrix(x, y, w, h, [payload])
+    """
     image = None
     while image == None:
         os.exitpoint()
         buffer_lock.acquire()
         image = ring_buffer.get()
         buffer_lock.release()
+
     # Obtain the width and height of the original image
     img_height = image.height()
     img_width = image.width()
     camera_center_x = img_width // 2
+    
     # Display.show_image(image)
-    qr_blobs = image.find_blobs(thresholds, pixels_threshold=1000, 
+    dm_blobs = image.find_blobs(thresholds, pixels_threshold=1000, 
                                 area_threshold=140, merge=True)
-    if not qr_blobs:
+    if not dm_blobs:
         # print("can't find blob")
         return image.find_datamatrices(effort = 400), camera_center_x
-    y, h = get_blobs_roi(qr_blobs, img_height)
+    y, h = get_blobs_roi(dm_blobs, img_height)
     if h < 60 :
         # print("no qr in blob")
         return image.find_datamatrices(effort = 400), camera_center_x
@@ -313,14 +325,14 @@ def process_image():
 def caculate_xpostion():
     """Scan the data matrix and 
     obtain the final x-position through a series of calculations and processing
-    :param avg_position:int,The final x-position obtained
+    :param current_position:int,The final x-position obtained
     :param camera_center_x: Image pixel center point
     :param payload:String, obtained QR code value
     :param number:int,The x-position segmented from the QR code value, in centimeters
     :type valid_positions:[int, ...],List of multiple x positions for image calculation
     """
     global front_position, proportion, count_of_has_position, ring_buffer
-    avg_position = -1
+    current_position = -1
 
     for i in range(error_of_none_position):
         os.exitpoint()
@@ -362,15 +374,23 @@ def caculate_xpostion():
 
         if number_of_min_distance is not None:
             position = min_distance/proportion + number_of_min_distance*1
-            avg_position = round(10*position)
-            front_position = avg_position
+            current_position = round(10*position)
+            front_position = current_position
             count_of_has_position += 1
-            write_position_to_file(avg_position)
+            write_position_to_file(current_position)
 
-        if avg_position != -1 :
+        if current_position != -1 :
             break
 
-    return avg_position
+    return current_position
+#################################################################################################################
+def uart_read(readbuf):
+    global uart
+    return uart.read(readbuf)
+#################################################################################################################
+def uart_send(writebuf):
+    global uart
+    uart.write(writebuf)
 #############################################################################################################
 #Please refer to page 22 of the instruction manual for detailed rules
 def request_telegram():
@@ -396,6 +416,9 @@ def request_telegram():
         return True
 ##############################################################################################################
 def response_telegram(caculate_pos, i):
+    """
+    send x-position to slave
+    """
     global ReqTelBuf, statusbits
     if caculate_pos == -1:
         return False
@@ -421,8 +444,7 @@ def main():
     wdt1 = WDT(1, 3)
     while True:
         os.exitpoint()
-        print("Free RAM:", gc.mem_free())
-        os.exitpoint()
+        # print("Free RAM:", gc.mem_free())
         if request_telegram():
             x_position = caculate_xpostion()
             if response_telegram(x_position, 0):
@@ -433,7 +455,6 @@ def main():
             response_telegram(0,1)
             pass
         wdt1.feed()
-#################################################################################################################
 ################################################################################################################
 #codestatus: debug
 ################################################################################################################
@@ -460,7 +481,6 @@ def distance_proportion():
         if timeout > 2000:
             print("plesae reset and try again")
             return None
-
 
     first_payload = []
     distance_proportion = []
@@ -500,8 +520,9 @@ def pixel_proportion():
     # print(f"front_position is {front_position}")
     distance_proportion()
     file_handler.write_data(proportion, front_position)
-###############################################################################################################
-##################################################################################################################
+################################################################################################################
+#codestatus: debug
+################################################################################################################
 if __name__ == '__main__':
     print("start")
     try:
