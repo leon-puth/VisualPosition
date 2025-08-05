@@ -1,9 +1,4 @@
-################################################################################################################
-#程序使用说明：
-#1.该程序用于通过二维码扫描获取物体的x位置，适用于需要精确定位的应用场景。
-#2.读头离二维码的高度设定为12cm±4cm，若布置高度和设定高度差异大，可运行PixelProportion.py脚本，通过计算二维码的像素比例系数，来提高定位精度。
-#3.读头的初始位置为上一次运行结束时的位置，若读头重新安装在新的位置，有必要运行PixelProportion.py脚本，来更新初始位置。
-################################################################################################################
+
 import time, math, os, gc, sys, _thread
 from media.sensor import *
 from media.display import *
@@ -11,70 +6,82 @@ from media.media import *
 from machine import UART, FPIOA, Pin, SPI, WDT
 ################################################################################################################
 class FileHandler:
-    """PixelProportion文件的格式为.txt
-    文件的第一个数是像素比例系数proportion,第二个数是初始位置存档,front_position
+    """
+    The format of PixelProportion file is txt.
+    The first number in the file is the pixel ratio, 
+    and the second number is the initial position archive, front_position
     """
     def __init__(self, file_path):
         self.file_path = file_path
     def read_data(self):
-        """从文件中读取两个整数数据(proportion, front_position)，
-        如果文件不存在或格式错误，返回默认值
+        """
+        Read two integer data (proportion, front_position) from the file,
+        If the file does not exist or the format is incorrect, 
+        return the default value
         """
         try:
-            # 尝试读取文件内容
+            # Attempt to read file content
             with open(self.file_path, 'r', encoding='utf-8') as file:
                 data = file.read().strip().split()
                 if not data:
                     if len(data) != 2:
-                        with open(self.file_path, 'w', encoding='utf-8') as file:
+                        with open(self.file_path, 'w', 
+                                  encoding='utf-8') as file:
                             file.write("25 500")
                             return 25, 500
                 else:
                     return int(data[0]), int(data[1])
         except:
-            # 如果文件不存在或读取时出错，创建并写入默认值
+            # If the file does not exist or there is an error reading, 
+            # create and write the default value
             with open(self.file_path, 'w') as file:
                 file.write("25 500")
                 return 25, 500
 
     def write_data(self, num1, num2):
-        """将两个整数数据(proportion, front_position)写入文件"""
+        """
+        Write two integer data (proportion, front_position)
+        to a file
+        """
         try:
             with open(self.file_path, 'w', encoding='utf-8') as file:
                 file.write(f"{num1} {num2}")
         except Exception as e:
-            print(f"写入文件时发生错误：{e}")
+            print(f"Error occurred while writing file:{e}")
 
     def update_data(self, num1=None, num2=None):
-        """更新指定的整数数据，可以单独更新一个或两个数据"""
-        # 先读取现有数据
+        """
+        Update specified integer data, 
+        can update one or two data separately
+        """
+        # Read existing data first
         current_num1, current_num2 = self.read_data()
 
-        # 更新指定的数据
+        # Update specified data
         if num1 is not None:
             current_num1 = num1
         if num2 is not None:
             current_num2 = num2
 
-        # 写入更新后的数据
+        # Write updated data
         self.write_data(current_num1, current_num2)
 
     def read_proportion(self):
-        """读取 像素系数"""
+        """Read pixel coefficients"""
         num1, _ = self.read_data()
         return num1
 
     def read_front_position(self):
-        """读取 起始位置"""
+        """Read the starting position"""
         _, num2 = self.read_data()
         return num2
 
     def write_prportion(self, num1):
-        """写入 像素系数"""
+        """Write pixel coefficients"""
         self.update_data(num1=num1)
 
     def write_front_position(self, num2):
-        """写入 起始位置"""
+        """Write starting position"""
         self.update_data(num2=num2)
 #################################################################################################################
 class WS2812B:
@@ -170,7 +177,8 @@ class RingBuffer:
 
     def put(self, img):
         if self.full:
-            # 如果缓冲区已满，移动尾指针以覆盖旧图片
+            # If the buffer is full, 
+            # move the tail pointer to overwrite the old image
             self.tail = (self.tail + 1) % self.size
             self.full = False
         self.buffer[self.head] = img
@@ -213,14 +221,16 @@ def safe_snapshot():
 # "E000028["
 # "D000037t"
 def split_payload(payload):
-    """将扫描所得值中的位置信息提取出来，并判断数据是否准确
-    :param payload:字符串
+    """
+    Extract the positional information from the scanned values 
+    and determine whether the data is accurate
+    :param payload: str
     """
     global front_position
     if not isinstance(payload, str) or len(payload) != 8:
         return None
 
-    #payload的格式："E000028[" 、"D000037t"
+    #Format of payload："E000028[" 、"D000037t"
     if (payload[0] != 'E') and (payload[0] != 'D'):
         return None
 
@@ -245,7 +255,8 @@ def split_payload(payload):
 ###############################################################################################################
 #To determine if the position signal is error or lost, filter the position signal.
 def write_position_to_file(current_position):
-    """将计算的x位置数据写入参数文件
+    """
+    Write the calculated x-position data into the parameter file
     """
     global front_position, count_of_has_position, fh
 
@@ -261,11 +272,12 @@ def get_blobs_roi(qr_blobs, img_height):
     h = img_height
     for blob in qr_blobs:
         _, y, _, h = blob.rect()
-        # 调整高度为 8 的整数倍
+        # Adjust the height to an integer multiple of 8
         h = ((h + 7) // 8) * 8
-        # 确保 y 不超出图像边界
+        # Ensure that y does not exceed the image boundary
         y = max(0, y - (h - blob.h()) // 2)
-        # 调整 y，确保截取区域不超出图像边界
+        # Adjust y to ensure that the cropped area 
+        # does not exceed the image boundary
         y = min(y, img_height - h)
     return y, h
 ##############################################################################################################
@@ -278,12 +290,13 @@ def process_image():
         buffer_lock.acquire()
         image = ring_buffer.get()
         buffer_lock.release()
-    # 获取原始图像的宽度和高度
+    # Obtain the width and height of the original image
     img_height = image.height()
     img_width = image.width()
     camera_center_x = img_width // 2
     # Display.show_image(image)
-    qr_blobs = image.find_blobs(thresholds, pixels_threshold=1000, area_threshold=140, merge=True)
+    qr_blobs = image.find_blobs(thresholds, pixels_threshold=1000, 
+                                area_threshold=140, merge=True)
     if not qr_blobs:
         # print("can't find blob")
         return image.find_datamatrices(effort = 400), camera_center_x
@@ -293,17 +306,18 @@ def process_image():
         return image.find_datamatrices(effort = 400), camera_center_x
     else:
         # print("get blob success!")
-        qrcode_img = image.copy(roi = (0, y, img_width, h))
-        # Display.show_image(qrcode_img)
-        return  qrcode_img.find_datamatrices(effort = 400), camera_center_x
+        dm_img = image.copy(roi = (0, y, img_width, h))
+        # Display.show_image(dm_img)
+        return  dm_img.find_datamatrices(effort = 400), camera_center_x
 ###############################################################################################################
 def caculate_xpostion():
-    """扫描二维码，并通过一系列计算处理得到最终x位置
-    :param avg_position:int,得到的最终x位置
-    :param camera_center_x: 图片像素中心点
-    :param payload:字符串，得到的二维码值
-    :param number:int,从二维码值中分割得到的x位置,单位cm
-    :type valid_positions:[int, ...],图片计算的多个x位置的列表
+    """Scan the data matrix and 
+    obtain the final x-position through a series of calculations and processing
+    :param avg_position:int,The final x-position obtained
+    :param camera_center_x: Image pixel center point
+    :param payload:String, obtained QR code value
+    :param number:int,The x-position segmented from the QR code value, in centimeters
+    :type valid_positions:[int, ...],List of multiple x positions for image calculation
     """
     global front_position, proportion, count_of_has_position, ring_buffer
     avg_position = -1
@@ -360,8 +374,9 @@ def caculate_xpostion():
 #############################################################################################################
 #Please refer to page 22 of the instruction manual for detailed rules
 def request_telegram():
-    """判断是否发送请求，接收两个字节校验
-    :param readbufs:接收的两个校验字节序列 eg:A35C
+    """Determine whether to send a request and 
+    receive two byte verification
+    :param readbufs:Received two check byte sequences eg:A35C
     """
     global ReqTelBuf
     readbufs = uart_read(2)
@@ -370,7 +385,9 @@ def request_telegram():
     byte0 = readbufs[0]
     byte1 = readbufs[1]
 
-    #校验规则：第一个字节为0xA_,第二个字节为第一个字节取反，并将第一个字节低两位赋给ReqTelBuf
+    #Verification rule: The first byte is 0xA_, 
+    # the second byte is the inverse of the first byte, 
+    # and the lower two bits of the first byte are assigned to ReqTelBuf
     if byte0 != ((~byte1) & 0xFF):
         return False
 
@@ -401,37 +418,29 @@ def response_telegram(caculate_pos, i):
     return True
 ##################################################################################################################
 def main():
-    #    wdt1 = WDT(1, 3)
+    wdt1 = WDT(1, 3)
     while True:
         os.exitpoint()
-        x_position = caculate_xpostion()
-        if x_position != -1:
-            uart_send("\r\n")
-            uart_send(f"x position is {x_position}\r\n")
-            uart_send("\r\n")
-            print(x_position)
+        print("Free RAM:", gc.mem_free())
+        os.exitpoint()
+        if request_telegram():
+            x_position = caculate_xpostion()
+            if response_telegram(x_position, 0):
+                pass
+            else:
+                response_telegram(0,2)
         else:
-            uart_send("null\r\n")
-        # print("Free RAM:", gc.mem_free())
-        # os.exitpoint()
-        # if request_telegram():
-        #     x_position = caculate_xpostion()
-        #     if response_telegram(x_position, 0):
-        #         pass
-        #     else:
-        #         response_telegram(0,2)
-        # else:
-        #         response_telegram(0,1)
-        #     pass
-        # wdt1.feed()
+            response_telegram(0,1)
+            pass
+        wdt1.feed()
 #################################################################################################################
 ################################################################################################################
 #codestatus: debug
 ################################################################################################################
 def distance_proportion():
-    """计算初始位置的x位置,并得到像素比例系数
-    :typr first_payload:[int, ...],初始位置得到的x位置列表
-    :typr distance_proportion:[int, ...],像素比例系数列表
+    """Calculate the x-position of the initial position and obtain the pixel scale coefficient
+    :typr first_payload:[int, ...],List of x positions obtained from the initial position
+    :typr distance_proportion:[int, ...],Pixel Scale Coefficient List
     """
     global proportion, front_position, ring_buffer
 
